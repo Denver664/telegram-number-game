@@ -21,7 +21,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Ключі API
-TELEGRAM_TOKEN = "8480004036:AAHPjL-RiItdX6eT-QKyBopkxpfrmA2aDVs"
+TELEGRAM_TOKEN = "8025420408:AAEgGtdgsC081CanU_SLtEqVgPIbf-Hlelo"
 GOOGLE_AI_API_KEY = "AIzaSyAbK4LMlTsR2MxlG5R76Nlx6RJIyAD_FhY"
 
 # Ініціалізація Google AI
