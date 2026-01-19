@@ -1,0 +1,11 @@
+services:
+  - type: worker
+    name: telegram-number-bot
+    runtime: python311
+    buildCommand: pip install -r requirements.txt
+    startCommand: python aibot.py
+    envVars:
+      - key: TELEGRAM_TOKEN
+        value: 8480004036:AAHPjL-RiItdX6eT-QKyBopkxpfrmA2aDVs
+      - key: GOOGLE_AI_API_KEY
+        value: AIzaSyAbK4LMlTsR2MxlG5R76Nlx6RJIyAD_FhY
