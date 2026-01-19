@@ -34,6 +34,10 @@ LEADERBOARD_FILE = "leaderboard.json"
 # Словник для зберігання стану гри
 game_state: Dict[int, Dict[str, Any]] = {}
 
+# Словник для управління кімнатами мультиплеєра
+multiplayer_rooms: Dict[str, Dict[str, Any]] = {}
+user_to_room: Dict[int, str] = {}  # Зв'язок користувача з кодом кімнати
+
 # ======================== ФУНКЦІЇ РОБОТИ З ТАБЛИЦЕЮ РЕКОРДІВ ========================
 
 def load_leaderboard() -> List[Dict[str, Any]]:
@@ -265,6 +269,389 @@ async def competition_exit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.message.reply_text("Вибери режим:", reply_markup=main_menu_keyboard())
     await query.answer()
 
+# ======================== МУЛЬТИПЛЕЄР: ГРА З ДРУГОМ ========================
+
+def generate_room_code() -> str:
+    """Генерує унікальний код кімнати"""
+    import string
+    chars = string.ascii_uppercase + string.digits
+    return ''.join(random.choice(chars) for _ in range(6))
+
+async def multiplayer_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Створює нову кімнату для гри з другом"""
+    user_id = update.effective_user.id
+    username = update.effective_user.first_name or "User"
+    
+    room_code = generate_room_code()
+    
+    # Створюємо кімнату
+    multiplayer_rooms[room_code] = {
+        "player1_id": user_id,
+        "player1_name": username,
+        "player2_id": None,
+        "player2_name": None,
+        "player1_number": None,
+        "player2_number": None,
+        "stage": "waiting_player2",
+        "player1_attempts": 0,
+        "player2_attempts": 0,
+        "winner": None
+    }
+    
+    user_to_room[user_id] = room_code
+    
+    logger.info(f"👥 {username} (ID: {user_id}) створив кімнату: {room_code}")
+    
+    await update.message.reply_text(
+        f"👥 ГОРА З ДРУГОМ\n\n"
+        f"✅ Кімната створена!\n\n"
+        f"🔑 КОД КІМНАТИ: **{room_code}**\n\n"
+        f"Надішли цей код своєму другу.\n"
+        f"Він зможе приєднатися за допомогою команди /join_room {room_code}\n\n"
+        f"💬 Очікування другого гравця...",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Скасувати", callback_data=f"multiplayer_cancel_{room_code}")]
+        ])
+    )
+
+async def join_room(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Приєднується до існуючої кімнати"""
+    user_id = update.effective_user.id
+    username = update.effective_user.first_name or "User"
+    
+    # Отримуємо код кімнати з команди
+    try:
+        room_code = context.args[0].upper() if context.args else None
+    except (IndexError, AttributeError):
+        await update.message.reply_text("❌ Використовуй: /join_room КОД")
+        return
+    
+    if not room_code or room_code not in multiplayer_rooms:
+        await update.message.reply_text(f"❌ Кімната **{room_code}** не знайдена!")
+        return
+    
+    room = multiplayer_rooms[room_code]
+    
+    if room["player2_id"] is not None:
+        await update.message.reply_text(f"❌ Кімната **{room_code}** вже повна!")
+        return
+    
+    if user_id == room["player1_id"]:
+        await update.message.reply_text("❌ Ти не можеш приєднатися до своєї кімнати!")
+        return
+    
+    # Гравець 2 приєднується
+    room["player2_id"] = user_id
+    room["player2_name"] = username
+    room["stage"] = "waiting_numbers"
+    user_to_room[user_id] = room_code
+    
+    logger.info(f"👥 {username} (ID: {user_id}) приєднався до кімнати: {room_code}")
+    
+    # Повідомляємо обох гравців
+    await update.message.reply_text(
+        f"👥 ГРА ПОЧИНАЄТЬСЯ!\n\n"
+        f"⚔️ Супротивник: **{room['player1_name']}**\n\n"
+        f"🎮 Тепер загадай число від 1 до 100\n"
+        f"(Надішли число як звичайне повідомлення)",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Вийти", callback_data=f"multiplayer_exit_{room_code}")]
+        ])
+    )
+    
+    # Context потрібен для відправки повідомлення першому гравцю
+    # Можемо зберегти chat_id у контексті
+    if hasattr(context, 'bot'):
+        try:
+            await context.bot.send_message(
+                chat_id=room["player1_id"],
+                text=f"👥 ГРА ПОЧИНАЄТЬСЯ!\n\n⚔️ Супротивник: **{username}**\n\n🎮 Тепер загадай число від 1 до 100\n(Надішли число як звичайне повідомлення)",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("❌ Вийти", callback_data=f"multiplayer_exit_{room_code}")]
+                ])
+            )
+        except:
+            pass
+
+async def multiplayer_number_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отримує число від гравця"""
+    user_id = update.effective_user.id
+    
+    if user_id not in user_to_room:
+        return
+    
+    room_code = user_to_room[user_id]
+    if room_code not in multiplayer_rooms:
+        return
+    
+    room = multiplayer_rooms[room_code]
+    
+    if room["stage"] != "waiting_numbers":
+        return
+    
+    try:
+        number = int(update.message.text)
+        if not (1 <= number <= 100):
+            await update.message.reply_text("❌ Число повинно бути від 1 до 100!")
+            return
+    except ValueError:
+        return
+    
+    # Визначаємо якого гравця
+    is_player1 = user_id == room["player1_id"]
+    
+    if is_player1:
+        room["player1_number"] = number
+        logger.info(f"👤 {room['player1_name']} загадав число для мультиплеєра: {number}")
+    else:
+        room["player2_number"] = number
+        logger.info(f"👤 {room['player2_name']} загадав число для мультиплеєра: {number}")
+    
+    # Перевіримо чи обидва гравці загадали числа
+    if room["player1_number"] is not None and room["player2_number"] is not None:
+        room["stage"] = "game_running"
+        
+        # Повідомляємо обом гравцям що гра почалася
+        keyboard = [
+            [InlineKeyboardButton("🔢 1", callback_data=f"mp_guess_{room_code}_1")],
+            [InlineKeyboardButton("🔢 25", callback_data=f"mp_guess_{room_code}_25")],
+            [InlineKeyboardButton("🔢 50", callback_data=f"mp_guess_{room_code}_50")],
+            [InlineKeyboardButton("🔢 75", callback_data=f"mp_guess_{room_code}_75")],
+            [InlineKeyboardButton("🔢 100", callback_data=f"mp_guess_{room_code}_100")],
+            [InlineKeyboardButton("📝 Своє число", callback_data=f"mp_custom_{room_code}")],
+            [InlineKeyboardButton("💡 Підказка", callback_data=f"mp_hint_{room_code}")],
+            [InlineKeyboardButton("❌ Вийти", callback_data=f"multiplayer_exit_{room_code}")]
+        ]
+        
+        msg_text = f"⚔️ ГРА РОЗПОЧАЛАСЬ!\n\n🎯 Вгадай число супротивника (1-100)!\n\nВибери число або натисни кнопку:"
+        
+        if hasattr(context, 'bot'):
+            try:
+                await context.bot.send_message(
+                    chat_id=room["player1_id"],
+                    text=msg_text,
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+                await context.bot.send_message(
+                    chat_id=room["player2_id"],
+                    text=msg_text,
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            except:
+                pass
+
+async def multiplayer_guess(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обробляє здогад гравця"""
+    query = update.callback_query
+    user_id = query.from_user.id
+    
+    if user_id not in user_to_room:
+        await query.answer("❌ Ви не в кімнаті", show_alert=True)
+        return
+    
+    room_code = user_to_room[user_id]
+    if room_code not in multiplayer_rooms:
+        await query.answer("❌ Кімната не знайдена", show_alert=True)
+        return
+    
+    room = multiplayer_rooms[room_code]
+    
+    if room["stage"] != "game_running" and room["stage"] != "game_guessing":
+        await query.answer("❌ Гра не в статусі для здогадів", show_alert=True)
+        return
+    
+    room["stage"] = "game_guessing"
+    
+    # Отримуємо число з callback_data
+    data_parts = query.data.split("_")
+    guess = int(data_parts[2])
+    
+    is_player1 = user_id == room["player1_id"]
+    opponent_number = room["player2_number"] if is_player1 else room["player1_number"]
+    opponent_id = room["player2_id"] if is_player1 else room["player1_id"]
+    
+    if is_player1:
+        room["player1_attempts"] += 1
+        player_name = room["player1_name"]
+    else:
+        room["player2_attempts"] += 1
+        player_name = room["player2_name"]
+    
+    await query.answer()
+    
+    if guess == opponent_number:
+        # ПЕРЕМОГА!
+        room["stage"] = "finished"
+        room["winner"] = "player1" if is_player1 else "player2"
+        
+        winner_attempts = room["player1_attempts"] if is_player1 else room["player2_attempts"]
+        loser_name = room["player2_name"] if is_player1 else room["player1_name"]
+        
+        add_record(player_name, "👥 Гра з другом", winner_attempts, True)
+        add_record(loser_name, "👥 Гра з другом", (room["player2_attempts"] if is_player1 else room["player1_attempts"]), False)
+        
+        await query.edit_message_text(
+            f"🎉 ПЕРЕМОГА! 🎉\n\n"
+            f"👑 {player_name} вгадав число {opponent_number} за {winner_attempts} спроб!\n\n"
+            f"⚔️ {loser_name} не встиг...\n\n"
+            f"🏆 ЧЕМПІОН: {player_name}!"
+        )
+        
+        if hasattr(context, 'bot'):
+            try:
+                await context.bot.send_message(
+                    chat_id=opponent_id,
+                    text=f"❌ ПРОГРАШ!\n\n👑 {player_name} вгадав число {opponent_number} за {winner_attempts} спроб!\n\nТвоє число було {opponent_number}",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Меню", callback_data="menu_main")]])
+                )
+            except:
+                pass
+        
+        # Очищуємо комнату через 5 хвилин
+        del multiplayer_rooms[room_code]
+        del user_to_room[room["player1_id"]]
+        if room["player2_id"]:
+            del user_to_room[room["player2_id"]]
+        
+        await query.message.reply_text("Вибери режим:", reply_markup=main_menu_keyboard())
+    else:
+        if guess < opponent_number:
+            hint = "💡 Число БІЛЬШЕ"
+        else:
+            hint = "💡 Число МЕНШЕ"
+        
+        await query.edit_message_text(
+            f"❌ Неправильно!\n\n{hint}\n\n"
+            f"Спроби: {room['player1_attempts'] if is_player1 else room['player2_attempts']}"
+        )
+
+async def multiplayer_hint(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Дає підказку супротивнику"""
+    query = update.callback_query
+    user_id = query.from_user.id
+    
+    if user_id not in user_to_room:
+        await query.answer("❌ Ви не в кімнаті", show_alert=True)
+        return
+    
+    room_code = user_to_room[user_id]
+    if room_code not in multiplayer_rooms:
+        await query.answer("❌ Кімната не знайдена", show_alert=True)
+        return
+    
+    room = multiplayer_rooms[room_code]
+    
+    is_player1 = user_id == room["player1_id"]
+    your_number = room["player1_number"] if is_player1 else room["player2_number"]
+    opponent_id = room["player2_id"] if is_player1 else room["player1_id"]
+    
+    await query.answer()
+    
+    await query.message.reply_text("📝 Напиши підказку для супротивника (більше/менше):")
+
+async def multiplayer_custom_guess(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Користувач вводить своє число для здогаду"""
+    query = update.callback_query
+    user_id = query.from_user.id
+    
+    if user_id not in user_to_room:
+        await query.answer("❌ Ви не в кімнаті", show_alert=True)
+        return
+    
+    room_code = user_to_room[user_id]
+    if room_code not in multiplayer_rooms:
+        await query.answer("❌ Кімната не знайдена", show_alert=True)
+        return
+    
+    room = multiplayer_rooms[room_code]
+    
+    # Зберігаємо стан що чекаємо вводу числа
+    user_awaiting_input = f"awaiting_guess_{room_code}"
+    if not hasattr(context, 'user_data'):
+        context.user_data = {}
+    context.user_data[user_awaiting_input] = True
+    
+    await query.answer()
+    await query.edit_message_text("📝 Введи число (1-100):")
+
+async def multiplayer_exit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Вихід з мультиплеєр гри"""
+    query = update.callback_query
+    user_id = query.from_user.id
+    
+    # Отримуємо код кімнати з callback_data
+    data_parts = query.data.split("_")
+    room_code = data_parts[2]
+    
+    if room_code not in multiplayer_rooms:
+        await query.answer("❌ Кімната не знайдена", show_alert=True)
+        return
+    
+    room = multiplayer_rooms[room_code]
+    
+    # Визначаємо якого гравця
+    is_player1 = user_id == room["player1_id"]
+    opponent_id = room["player2_id"] if is_player1 else room["player1_id"]
+    
+    # Очищуємо дані
+    if room_code in user_to_room:
+        if user_id in user_to_room and user_to_room[user_id] == room_code:
+            del user_to_room[user_id]
+    
+    if room["stage"] == "waiting_player2":
+        # Ще ніхто не приєднався
+        await query.edit_message_text("❌ Кімната скасована.")
+        del multiplayer_rooms[room_code]
+    else:
+        # Гра була розпочата
+        await query.edit_message_text("❌ Ви вийшли з гри.")
+        
+        if opponent_id and hasattr(context, 'bot'):
+            try:
+                opponent_name = room["player1_name"] if not is_player1 else room["player2_name"]
+                await context.bot.send_message(
+                    chat_id=opponent_id,
+                    text=f"❌ Супротивник ({opponent_name}) вийшов з гри!",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Меню", callback_data="menu_main")]])
+                )
+                if opponent_id in user_to_room:
+                    del user_to_room[opponent_id]
+            except:
+                pass
+        
+        del multiplayer_rooms[room_code]
+    
+    await query.answer()
+    await query.message.reply_text("Вибери режим:", reply_markup=main_menu_keyboard())
+
+async def multiplayer_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Скасування очікування другого гравця"""
+    query = update.callback_query
+    user_id = query.from_user.id
+    
+    data_parts = query.data.split("_")
+    room_code = data_parts[2]
+    
+    if room_code not in multiplayer_rooms:
+        await query.answer("❌ Кімната не знайдена", show_alert=True)
+        return
+    
+    room = multiplayer_rooms[room_code]
+    
+    if room["player1_id"] != user_id:
+        await query.answer("❌ Тільки створювач може скасувати", show_alert=True)
+        return
+    
+    await query.edit_message_text("❌ Пошук скасовано.")
+    del multiplayer_rooms[room_code]
+    del user_to_room[user_id]
+    
+    await query.answer()
+    await query.message.reply_text("Вибери режим:", reply_markup=main_menu_keyboard())
+
 # ======================== ФУНКЦІЇ МЕНЮ ========================
 
 def main_menu_keyboard() -> ReplyKeyboardMarkup:
@@ -273,8 +660,8 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
         [KeyboardButton("🤖 AI вгадує"), KeyboardButton("🎯 Ти вгадуєш")],
         [KeyboardButton("📊 Рівні складності"), KeyboardButton("🏃 Марафон")],
         [KeyboardButton("⏱️ Швидкісна гра"), KeyboardButton("⚡ Змагання")],
-        [KeyboardButton("📈 Моя статистика"), KeyboardButton("🏆 Рекорди")],
-        [KeyboardButton("❓ Допомога")]
+        [KeyboardButton("� Гра з другом"), KeyboardButton("📈 Моя статистика")],
+        [KeyboardButton("🏆 Рекорди"), KeyboardButton("❓ Допомога")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -586,8 +973,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Допоможи AI підказками 'Більше' або 'Менше'.\n\n"
         "🎯 **Ти вгадуєш**: Вгадай число (від 1 до 100), яке загадав AI. "
         "Тобі дається 3 спроби для вибору з 3 варіантів.\n\n"
-        "⚡ **Змагання**: Ти й AI одночасно намагаєтеся вгадати число один одного! "
+        "⚡ **Змагання з ботом**: Ти й AI одночасно намагаєтеся вгадати число один одного! "
         "Хто перший вгадає - той виграє! 🏆\n\n"
+        "👥 **Гра з другом**: Грай 1v1 з другом! "
+        "Жми кнопку, отримаєш код кімнати, розповідай другу код, й граймо! "
+        "Обидва гравці вгадують числа один одного - хто перший вгадає, той переміг!\n"
+        "/join_room КОД - для приєднання до кімнати\n\n"
         "📊 **Рівні складності**: Легкий (1-50), Середній (1-100), Важкий (1-1000)\n\n"
         "🏃 **Марафон**: 5 раундів підряд, де ти вгадуєш число AI\n\n"
         "⏱️ **Швидкісна гра**: Гра проти часу! Вгадай число за 5 спроб\n\n"
@@ -604,12 +995,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text
     
-    # Обробка змагання
+    # Обробка змагання з ботом
     if user_id in game_state and game_state[user_id]["mode"] == "competition":
         if game_state[user_id]["stage"] == "waiting_user_number":
             return await competition_number_input(update, context)
         elif game_state[user_id]["stage"] == "competition_running":
             return await competition_response(update, context)
+    
+    # Обробка мультиплеєра - введення чисел
+    if user_id in user_to_room:
+        room_code = user_to_room[user_id]
+        if room_code in multiplayer_rooms:
+            room = multiplayer_rooms[room_code]
+            if room["stage"] == "waiting_numbers":
+                return await multiplayer_number_input(update, context)
+            elif room["stage"] == "game_guessing":
+                try:
+                    guess = int(text)
+                    if 1 <= guess <= 100:
+                        # Створюємо фальшиво callback_query для обробки здогаду
+                        data = f"mp_guess_{room_code}_{guess}"
+                        update.callback_query = type('obj', (object,), {
+                            'data': data,
+                            'from_user': update.effective_user,
+                            'answer': lambda **kwargs: None,
+                            'edit_message_text': lambda text, **kwargs: update.message.reply_text(text, **kwargs) if kwargs else update.message.reply_text(text),
+                            'message': update.message
+                        })()
+                        return await multiplayer_guess(update, context)
+                except ValueError:
+                    pass
     
     if text == "🤖 AI вгадує":
         return await ai_guess_start(update, context)
@@ -626,6 +1041,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await timed_game_start(update, context)
     elif text == "⚡ Змагання":
         return await competition_start(update, context)
+    elif text == "👥 Гра з другом":
+        return await multiplayer_start(update, context)
     elif text == "📈 Моя статистика":
         return await show_user_stats(update, context)
     elif text == "🏆 Рекорди":
@@ -1053,6 +1470,7 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("records", show_leaderboard))
+    application.add_handler(CommandHandler("join_room", join_room))
     
     # Обробники callback-кнопок (старі режими)
     application.add_handler(CallbackQueryHandler(ai_guess_response, pattern="^ai_"))
@@ -1074,6 +1492,13 @@ def main():
     
     # Режим: Змагання
     application.add_handler(CallbackQueryHandler(competition_exit, pattern="^competition_exit$"))
+    
+    # Режим: Мультиплеєр
+    application.add_handler(CallbackQueryHandler(multiplayer_guess, pattern="^mp_guess_"))
+    application.add_handler(CallbackQueryHandler(multiplayer_custom_guess, pattern="^mp_custom_"))
+    application.add_handler(CallbackQueryHandler(multiplayer_hint, pattern="^mp_hint_"))
+    application.add_handler(CallbackQueryHandler(multiplayer_exit, pattern="^multiplayer_exit_"))
+    application.add_handler(CallbackQueryHandler(multiplayer_cancel, pattern="^multiplayer_cancel_"))
     
     # Обробник текстових повідомлень
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
