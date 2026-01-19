@@ -1,0 +1,11 @@
+# Telegram Bot Guessing Game
+# Deploy to Railway.app
+
+node_modules/
+.env
+.DS_Store
+__pycache__/
+*.pyc
+.git/
+.venv/
+venv/
