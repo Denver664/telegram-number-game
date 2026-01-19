@@ -82,13 +82,199 @@ def format_leaderboard() -> str:
 
 # ======================== ФУНКЦІЇ МЕНЮ ========================
 
+async def competition_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Починає змагання між користувачем і ботом"""
+    user_id = update.effective_user.id
+    username = update.effective_user.first_name or "User"
+    
+    game_state[user_id] = {
+        "mode": "competition",
+        "stage": "waiting_user_number",
+        "username": username,
+        "user_number": None,
+        "bot_number": random.randint(1, 100),
+        "ai_min": 1,
+        "ai_max": 100,
+        "bot_attempts": 0,
+        "user_attempts": 0,
+        "winner": None
+    }
+    
+    logger.info(f"⚡ {username} розпочав змагання. Бот загадав число: {game_state[user_id]['bot_number']}")
+    
+    await update.message.reply_text(
+        f"⚡ ЗМАГАННЯ ПОЧИНАЄТЬСЯ!\n\n"
+        f"🎮 Загадай число від 1 до 100\n"
+        f"(Надішли число як звичайне повідомлення)\n\n"
+        f"Потім ми одночасно намагатимемося вгадати число один одного!\n"
+        f"Хто перший вгадає - той виграє! 🏆",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🚫 Вихід", callback_data="competition_exit")]
+        ])
+    )
+
+async def competition_number_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отримує число від користувача для змагання"""
+    user_id = update.effective_user.id
+    
+    if user_id not in game_state or game_state[user_id]["mode"] != "competition":
+        return
+    
+    if game_state[user_id]["stage"] != "waiting_user_number":
+        return
+    
+    try:
+        user_number = int(update.message.text)
+        if not (1 <= user_number <= 100):
+            await update.message.reply_text("❌ Число повинно бути від 1 до 100!")
+            return
+    except ValueError:
+        return
+    
+    state = game_state[user_id]
+    state["user_number"] = user_number
+    state["stage"] = "competition_running"
+    
+    logger.info(f"👤 {state['username']} загадав число для змагання: {user_number}")
+    
+    await update.message.reply_text(
+        f"✅ Ти загадав число!\n\n"
+        f"🤖 Я загадав число від 1 до 100\n\n"
+        f"Тепер вгадуй моє число! Напиши 'більше', 'менше' або номер ➡️",
+        reply_markup=main_menu_keyboard()
+    )
+    
+    # Бот робить першу спробу
+    bot_guess = 50
+    state["bot_last_guess"] = bot_guess
+    state["bot_attempts"] += 1
+    
+    await update.message.reply_text(
+        f"🤖 Моя перша спроба: **{bot_guess}**\n\n"
+        f"Більше чи менше твоє число?"
+    )
+
+async def competition_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обробляє відповіді під час змагання"""
+    user_id = update.effective_user.id
+    
+    if user_id not in game_state or game_state[user_id]["mode"] != "competition":
+        return
+    
+    if game_state[user_id]["stage"] != "competition_running":
+        return
+    
+    state = game_state[user_id]
+    text = update.message.text.lower().strip()
+    
+    # Перевірка чи користувач ввів число
+    try:
+        guess = int(text)
+        if 1 <= guess <= 100:
+            state["user_attempts"] += 1
+            
+            if guess == state["bot_number"]:
+                # Користувач вгадав!
+                state["winner"] = "user"
+                add_record(state["username"], "⚡ Змагання", state["user_attempts"], True)
+                
+                await update.message.reply_text(
+                    f"🎉 ТИ ПЕРЕМІГ! 🎉\n\n"
+                    f"Ти вгадав моє число ({state['bot_number']}) за {state['user_attempts']} спроб!\n"
+                    f"Я не встиг вгадати твоє число... 😢\n\n"
+                    f"👑 ЧЕМПІОН!"
+                )
+                del game_state[user_id]
+                await update.message.reply_text("Вибери режим:", reply_markup=main_menu_keyboard())
+                return
+            elif guess < state["bot_number"]:
+                await update.message.reply_text(f"💡 Мое число **більше** за {guess}")
+            else:
+                await update.message.reply_text(f"💡 Мое число **менше** за {guess}")
+            
+            return
+    except ValueError:
+        pass
+    
+    # Обробка відповідей "більше" / "менше"
+    if "більше" in text or "вище" in text or "більш" in text:
+        state["ai_min"] = state["bot_last_guess"] + 1
+        
+        if state["ai_min"] > state["ai_max"]:
+            await update.message.reply_text("❌ Ти дав суперечливі відповіді!")
+            return
+        
+        bot_guess = (state["ai_min"] + state["ai_max"]) // 2
+        state["bot_last_guess"] = bot_guess
+        state["bot_attempts"] += 1
+        
+        # Перевірка чи бот вгадав
+        if bot_guess == state["user_number"]:
+            state["winner"] = "bot"
+            add_record(state["username"], "⚡ Змагання", state["user_attempts"], False)
+            
+            await update.message.reply_text(
+                f"🤖 БОТА ПЕРЕМОГА! 🤖\n\n"
+                f"Я вгадав твоє число ({state['user_number']}) за {state['bot_attempts']} спроб!\n"
+                f"Ти встиг зробити {state['user_attempts']} спроб...\n\n"
+                f"Я сильніший! 🏆"
+            )
+            del game_state[user_id]
+            await update.message.reply_text("Вибери режим:", reply_markup=main_menu_keyboard())
+            return
+        
+        await update.message.reply_text(f"🤖 Спроба {state['bot_attempts']}: **{bot_guess}**")
+        
+    elif "менше" in text or "нижче" in text or "менш" in text:
+        state["ai_max"] = state["bot_last_guess"] - 1
+        
+        if state["ai_min"] > state["ai_max"]:
+            await update.message.reply_text("❌ Ти дав суперечливі відповіді!")
+            return
+        
+        bot_guess = (state["ai_min"] + state["ai_max"]) // 2
+        state["bot_last_guess"] = bot_guess
+        state["bot_attempts"] += 1
+        
+        # Перевірка чи бот вгадав
+        if bot_guess == state["user_number"]:
+            state["winner"] = "bot"
+            add_record(state["username"], "⚡ Змагання", state["user_attempts"], False)
+            
+            await update.message.reply_text(
+                f"🤖 БОТА ПЕРЕМОГА! 🤖\n\n"
+                f"Я вгадав твоє число ({state['user_number']}) за {state['bot_attempts']} спроб!\n"
+                f"Ти встиг зробити {state['user_attempts']} спроб...\n\n"
+                f"Я сильніший! 🏆"
+            )
+            del game_state[user_id]
+            await update.message.reply_text("Вибери режим:", reply_markup=main_menu_keyboard())
+            return
+        
+        await update.message.reply_text(f"🤖 Спроба {state['bot_attempts']}: **{bot_guess}**")
+
+async def competition_exit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Вихід з змагання"""
+    query = update.callback_query
+    user_id = query.from_user.id
+    
+    if user_id in game_state:
+        del game_state[user_id]
+    
+    await query.edit_message_text("❌ Змагання скасовано.")
+    await query.message.reply_text("Вибери режим:", reply_markup=main_menu_keyboard())
+    await query.answer()
+
+# ======================== ФУНКЦІЇ МЕНЮ ========================
+
 def main_menu_keyboard() -> ReplyKeyboardMarkup:
     """Головне меню"""
     keyboard = [
         [KeyboardButton("🤖 AI вгадує"), KeyboardButton("🎯 Ти вгадуєш")],
         [KeyboardButton("📊 Рівні складності"), KeyboardButton("🏃 Марафон")],
-        [KeyboardButton("⏱️ Швидкісна гра"), KeyboardButton("📈 Моя статистика")],
-        [KeyboardButton("🏆 Рекорди"), KeyboardButton("❓ Допомога")]
+        [KeyboardButton("⏱️ Швидкісна гра"), KeyboardButton("⚡ Змагання")],
+        [KeyboardButton("📈 Моя статистика"), KeyboardButton("🏆 Рекорди")],
+        [KeyboardButton("❓ Допомога")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -400,6 +586,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Допоможи AI підказками 'Більше' або 'Менше'.\n\n"
         "🎯 **Ти вгадуєш**: Вгадай число (від 1 до 100), яке загадав AI. "
         "Тобі дається 3 спроби для вибору з 3 варіантів.\n\n"
+        "⚡ **Змагання**: Ти й AI одночасно намагаєтеся вгадати число один одного! "
+        "Хто перший вгадає - той виграє! 🏆\n\n"
+        "📊 **Рівні складності**: Легкий (1-50), Середній (1-100), Важкий (1-1000)\n\n"
+        "🏃 **Марафон**: 5 раундів підряд, де ти вгадуєш число AI\n\n"
+        "⏱️ **Швидкісна гра**: Гра проти часу! Вгадай число за 5 спроб\n\n"
         "🏆 **Рекорди**: Побачи найкращих гравців!\n\n"
         "Мета: вгадати число за найменшу кількість спроб!",
         reply_markup=main_menu_keyboard(),
@@ -410,7 +601,15 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обробляє текстові повідомлення"""
+    user_id = update.effective_user.id
     text = update.message.text
+    
+    # Обробка змагання
+    if user_id in game_state and game_state[user_id]["mode"] == "competition":
+        if game_state[user_id]["stage"] == "waiting_user_number":
+            return await competition_number_input(update, context)
+        elif game_state[user_id]["stage"] == "competition_running":
+            return await competition_response(update, context)
     
     if text == "🤖 AI вгадує":
         return await ai_guess_start(update, context)
@@ -425,6 +624,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await marathon_start(update, context)
     elif text == "⏱️ Швидкісна гра":
         return await timed_game_start(update, context)
+    elif text == "⚡ Змагання":
+        return await competition_start(update, context)
     elif text == "📈 Моя статистика":
         return await show_user_stats(update, context)
     elif text == "🏆 Рекорди":
@@ -836,6 +1037,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📊 Рівні складності - Легкий/Середній/Важкий\n"
         "🏃 Марафон - 5 раундів підряд\n"
         "⏱️ Швидкісна гра - Гра проти часу\n"
+        "⚡ Змагання - Ти й AI вгадуєте одночасно!\n"
         "📈 Моя статистика - Твої результати\n"
         "🏆 Рекорди - ТОП гравців"
     )
@@ -869,6 +1071,9 @@ def main():
     # Режим: Швидкісна гра
     application.add_handler(CallbackQueryHandler(timed_generate_variants, pattern="^timed_generate_variants"))
     application.add_handler(CallbackQueryHandler(timed_choice, pattern="^timed_choice_"))
+    
+    # Режим: Змагання
+    application.add_handler(CallbackQueryHandler(competition_exit, pattern="^competition_exit$"))
     
     # Обробник текстових повідомлень
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
