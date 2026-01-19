@@ -11,7 +11,7 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler, 
     filters, ContextTypes
 )
-import google.genai as genai
+import google.generativeai as genai
 
 # Налаштування логування
 logging.basicConfig(
